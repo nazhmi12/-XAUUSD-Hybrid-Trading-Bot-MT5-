@@ -69,4 +69,4 @@ TAKE PROFIT: Entry Price ± (ATR * 1.5 * 2.0) (1:2 Risk to Reward Ratio)
 
 Educational Purposes Only. Trading in financial markets (Forex, Commodities, Crypto) involves a high degree of risk. The developer is not responsible for any financial losses incurred while using this software. Always test algorithms on a Demo Account before deploying real capital.
 
-Created by [Your Name/Handle] - 2026
+Created by Mr N - 2026

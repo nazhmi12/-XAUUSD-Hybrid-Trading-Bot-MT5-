@@ -1,265 +1,211 @@
-import MetaTrader5 as mt5
-import pandas as pd
-import requests
-import time
-import feedparser  # Tambahkan library ini
+import streamlit as st
+import json
+import time as time_mod
+import os
+import feedparser
 from datetime import datetime
-import ta
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ==========================================
-# KONFIGURASI AKUN MT5 & PARAMETER TRADING
+# 1. INISIALISASI HALAMAN & NLP
 # ==========================================
-MT5_LOGIN = 12345678            # Ganti dengan nomor akun MT5 kamu
-MT5_PASSWORD = "PasswordKamu"   # Ganti dengan password akun MT5 kamu
-MT5_SERVER = "Nama-Server-Broker" # Ganti nama server (contoh: "MetaQuotes-Demo" atau "Exness-MT5Trial6")
+st.set_page_config(page_title="Live Auto-Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 
-SYMBOL = "XAUUSD"
-LOT_SIZE = 0.01
-MAGIC_NUMBER = 999111
-TIMEFRAME = mt5.TIMEFRAME_H1
-# Multiplier untuk SL dan TP berbasis ATR
-SL_MULTIPLIER = 1.5 
-RR_RATIO = 2.0      
+@st.cache_resource
+def get_analyzer():
+    return SentimentIntensityAnalyzer()
 
-# Inisialisasi NLP untuk Sentimen
-analyzer = SentimentIntensityAnalyzer()
+analyzer = get_analyzer()
 
-# ==========================================
-# MODUL 1: KONEKSI & LOGIN MT5
-# ==========================================
-def initialize_mt5(symbol):
-    """Logika inisialisasi koneksi dan login ke akun MT5."""
-    # Initialize MT5 dengan kredensial
-    if not mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
-        print(f"Gagal menghubungkan ke MT5. Error: {mt5.last_error()}")
-        return False
+def analyze_news_impact(title):
+    title_lower = title.lower()
+    asset = "GLOBAL"
+    if any(w in title_lower for w in ["usd", "dollar", "fed", "powell", "rate", "inflation", "cpi"]): asset = "USD"
+    elif any(w in title_lower for w in ["eur", "euro", "ecb"]): asset = "EURUSD"
+    elif any(w in title_lower for w in ["gbp", "pound", "boe"]): asset = "GBPUSD"
+    elif any(w in title_lower for w in ["jpy", "yen", "boj"]): asset = "USDJPY"
         
-    # Validasi eksistensi simbol
-    symbol_info = mt5.symbol_info(symbol)
-    if symbol_info is None:
-        print(f"Error: Simbol {symbol} tidak ditemukan di server broker.")
-        mt5.shutdown()
-        return False
-        
-    # Eksekusi penambahan simbol ke Market Watch terminal jika belum ada
-    if not symbol_info.visible:
-        print(f"Menambahkan {symbol} ke Market Watch...")
-        if not mt5.symbol_select(symbol, True):
-            print(f"Gagal menambahkan {symbol}.")
-            mt5.shutdown()
-            return False
-            
-    print(f"✅ Berhasil Login ke Akun: {MT5_LOGIN} | Server: {MT5_SERVER}")
-    return True
+    score = analyzer.polarity_scores(title)['compound']
+    if score >= 0.15: return asset, "NAIK", "buy", round(abs(score), 2)
+    elif score <= -0.15: return asset, "TURUN", "sell", round(abs(score), 2)
+    return asset, "NETRAL", "hold", round(abs(score), 2)
 
-# ==========================================
-# MODUL 2: TARIK DATA MARKET (OHLCV)
-# ==========================================
-def get_market_data(symbol, timeframe, limit=100):
-    """Menarik data candlestick dari MT5 dan mengubahnya jadi DataFrame."""
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, limit)
+@st.cache_data(ttl=20)
+def get_live_news():
+    rss_sources = {
+        "FOREX FACTORY": "https://www.forexfactory.com/news.xml",
+        "FXSTREET": "https://www.fxstreet.com/rss/news",
+        "FOREXLIVE": "https://www.forexlive.com/feed/news",
+        "YAHOO": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=DX-Y.NYB&region=US&lang=en-US"
+    }
     
-    if rates is None or len(rates) == 0:
-        print("❌ Gagal menarik data market.")
-        return None
-        
-    # Konversi ke format DataFrame Pandas
-    df = pd.DataFrame(rates)
-    df['time'] = pd.to_datetime(df['time'], unit='s')
-    
-    # Kalkulasi Indikator Teknikal (Modul sebelumnya)
-    # Hitung RSI
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-    # Hitung EMA
-    df['ema_short'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
-    df['ema_long'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
-    # Hitung ATR untuk volatilitas
-    df['atr'] = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
-    
-    return df
-
-def get_technical_signals(df):
-    """Membaca tren teknikal dan mengekstrak nilai ATR."""
-    latest = df.iloc[-1]
-    tech_signal = 'HOLD'
-    
-    if latest['ema_short'] > latest['ema_long'] and latest['rsi'] < 40:
-        tech_signal = 'BUY'
-    elif latest['ema_short'] < latest['ema_long'] and latest['rsi'] > 70:
-        tech_signal = 'SELL'
-        
-    return tech_signal, latest['atr']
-
-# ==========================================
-# MODUL 3: ANALISA SENTIMEN BERITA (GRATIS VIA RSS)
-# ==========================================
-def get_news_sentiment(query_tidak_dipakai=""):
-    """Menarik berita Emas terbaru via Yahoo Finance RSS secara gratis."""
-    # Link RSS Yahoo Finance khusus ticker Emas (GC=F)
-    rss_url = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F&region=US&lang=en-US"
-    
-    try:
-        # Parse RSS Feed
-        feed = feedparser.parse(rss_url)
-        articles = feed.entries[:5] # Ambil 5 berita emas terbaru
-        
-        if not articles:
-            return 'NEUTRAL'
-            
-        total_score = 0
-        print("\n--- Berita Emas Terbaru (Yahoo Finance) ---")
-        for article in articles:
-            title = article.title
-            score = analyzer.polarity_scores(title)
-            total_score += score['compound']
-            print(f"> {title} (Score: {score['compound']:.2f})")
-            
-        avg_score = total_score / len(articles)
-        
-        if avg_score > 0.15:
-            return 'BULLISH'
-        elif avg_score < -0.15:
-            return 'BEARISH'
-        return 'NEUTRAL'
-        
-    except Exception as e:
-        print(f"Error fetch RSS news: {e}")
-        return 'NEUTRAL'
-
-# ==========================================
-# MODUL 4: MANAJEMEN RISIKO (SL/TP)
-# ==========================================
-def calculate_dynamic_sltp(entry_price, atr_value, signal_type):
-    """Hitung Stop Loss dan Take Profit berdasarkan nilai ATR."""
-    jarak_sl = atr_value * SL_MULTIPLIER
-    jarak_tp = jarak_sl * RR_RATIO
-    
-    if signal_type == 'BUY':
-        sl_price = entry_price - jarak_sl
-        tp_price = entry_price + jarak_tp
-    elif signal_type == 'SELL':
-        sl_price = entry_price + jarak_sl
-        tp_price = entry_price - jarak_tp
-    else:
-        return 0.0, 0.0
-        
-    return float(sl_price), float(tp_price)
-
-# ==========================================
-# MODUL 5: EKSEKUSI ORDER MT5
-# ==========================================
-def execute_trade(symbol, signal, atr_value, sentiment):
-    """Eksekusi trade berdasarkan konfirmasi ganda (Teknikal + Sentimen)."""
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Evaluasi {symbol}")
-    print(f"  > Technical : {signal} (ATR: {atr_value:.2f})")
-    print(f"  > Sentiment : {sentiment}")
-    
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        print("  ❌ Gagal mengambil data tick harga.")
-        return
-        
-    # LOGIKA ENTRY BUY
-    if signal == 'BUY' and sentiment == 'BULLISH':
-        entry_price = tick.ask
-        sl_price, tp_price = calculate_dynamic_sltp(entry_price, atr_value, 'BUY')
-        
-        print(f"  🚀 ACTION: ENTRY BUY @ {entry_price}")
-        print(f"     SL: {sl_price:.2f} | TP: {tp_price:.2f}")
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": LOT_SIZE,
-            "type": mt5.ORDER_TYPE_BUY,
-            "price": entry_price,
-            "sl": sl_price,
-            "tp": tp_price,
-            "deviation": 50,
-            "magic": MAGIC_NUMBER,
-            "comment": "Hybrid Bot Buy",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"  ❌ Order Gagal! Kode MT5: {result.retcode}")
-        else:
-            print("  ✅ Order BUY Berhasil Tereksekusi!")
-
-    # LOGIKA ENTRY SELL
-    elif signal == 'SELL' and sentiment == 'BEARISH':
-        entry_price = tick.bid
-        sl_price, tp_price = calculate_dynamic_sltp(entry_price, atr_value, 'SELL')
-        
-        print(f"  💥 ACTION: ENTRY SELL @ {entry_price}")
-        print(f"     SL: {sl_price:.2f} | TP: {tp_price:.2f}")
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": LOT_SIZE,
-            "type": mt5.ORDER_TYPE_SELL,
-            "price": entry_price,
-            "sl": sl_price,
-            "tp": tp_price,
-            "deviation": 50,
-            "magic": MAGIC_NUMBER,
-            "comment": "Hybrid Bot Sell",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"  ❌ Order Gagal! Kode MT5: {result.retcode}")
-        else:
-            print("  ✅ Order SELL Berhasil Tereksekusi!")
-            
-    else:
-        print("  ⏳ ACTION: HOLD. Kondisi belum valid.")
-
-# ==========================================
-# MAIN LOOP (SISTEM UTAMA)
-# ==========================================
-def run_bot():
-    """Fungsi utama untuk melooping bot agar terus berjalan."""
-    if not initialize_mt5(SYMBOL):
-        return
-        
-    print("\n=========================================")
-    print(f"🤖 Bot {SYMBOL} Aktif (Tekan Ctrl+C untuk Stop)")
-    print("=========================================")
-    
-    try:
-        while True:
-            # 1. Ambil Data Market
-            df = get_market_data(SYMBOL, TIMEFRAME)
-            if df is None:
-                time.sleep(60)
-                continue
+    news_items = []
+    for source_name, url in rss_sources.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                asset, impact_text, impact_type, conf = analyze_news_impact(entry.title)
                 
-            # 2. Analisa Chart & Volatilitas
-            tech_signal, atr_value = get_technical_signals(df)
+                # Parsing Waktu Lebih Akurat (Mendapatkan Tanggal)
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    pub_time = time_mod.strftime("%d %b %Y - %H:%M WIB", entry.published_parsed)
+                else:
+                    pub_time = datetime.now().strftime("%d %b %Y - %H:%M WIB")
+
+                news_items.append({
+                    "title": entry.title,
+                    "time": pub_time,
+                    "source": source_name,
+                    "asset": asset,
+                    "impact": impact_text,
+                    "conf": conf,
+                    "link": entry.link
+                })
+        except:
+            continue
+    return news_items
+
+# ==========================================
+# 3. CSS INJECTION 
+# ==========================================
+def load_custom_css():
+    st.markdown("""
+        <style>
+        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        .metric-container { background-color: #141414; border-radius: 8px; padding: 15px 20px; display: flex; flex-direction: column; border: 1px solid #2b2b2b; }
+        .border-green { border-left: 4px solid #00C853 !important; }
+        .border-red { border-left: 4px solid #D50000 !important; }
+        .border-gray { border-left: 4px solid #666666 !important; }
+        .metric-title { color: #8a8a8a; font-size: 12px; font-weight: 600; text-transform: uppercase; margin-bottom: 5px; }
+        .metric-value-row { display: flex; align-items: baseline; gap: 10px; }
+        .metric-price { color: #ffffff; font-size: 20px; font-weight: 700; margin: 0; }
+        .metric-change-up { color: #00C853; font-size: 13px; font-weight: 600; }
+        .metric-change-down { color: #D50000; font-size: 13px; font-weight: 600; }
+        .metric-change-hold { color: #8a8a8a; font-size: 13px; font-weight: 600; }
+        .panel-card { background-color: #141414; border: 1px solid #2b2b2b; border-radius: 8px; padding: 20px; margin-bottom: 15px; }
+        .panel-header { color: #8a8a8a; font-size: 12px; font-weight: 600; text-transform: uppercase; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; }
+        .status-dot { height: 10px; width: 10px; background-color: #ffffff; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .status-dot-active { background-color: #00C853; }
+        .status-dot-error { background-color: #D50000; }
+        .status-text { color: #ffffff; font-size: 18px; font-weight: 700; margin-bottom: 5px; }
+        .status-sub { color: #8a8a8a; font-size: 12px; font-family: monospace; }
+        .list-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #222; padding-bottom: 5px;}
+        .list-label { color: #d1d1d1; font-size: 14px; }
+        .list-val { color: #ffffff; font-size: 14px; font-weight: 600; }
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+        .badge-sell { background-color: rgba(213, 0, 0, 0.15); color: #D50000; }
+        .badge-buy { background-color: rgba(0, 200, 83, 0.15); color: #00C853; }
+        .badge-hold { background-color: rgba(255, 171, 0, 0.15); color: #FFAB00; }
+        .badge-blue { background-color: rgba(41, 121, 255, 0.15); color: #2979ff; }
+        </style>
+    """, unsafe_allow_html=True)
+
+# ==========================================
+# 4. KOMPONEN UI DINAMIS
+# ==========================================
+def render_header():
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown("<h2 style='margin:0; font-weight: 800;'>🎛️ Live Auto-Trading Terminal</h2>", unsafe_allow_html=True)
+    with col2:
+        now_str = datetime.now().strftime("%d %b %Y %H:%M:%S").upper()
+        st.markdown(f"<div style='text-align: right; color: #8a8a8a; font-family: monospace; margin-top: 15px;'>{now_str}</div>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin-top: 10px; margin-bottom: 20px;'>", unsafe_allow_html=True)
+
+def render_top_metrics(market_data):
+    cols = st.columns(len(market_data))
+    for i, item in enumerate(market_data):
+        sinyal = item.get("Sinyal", "HOLD")
+        if "BUY" in sinyal:
+            border_class, color_class = "border-green", "metric-change-up"
+        elif "SELL" in sinyal:
+            border_class, color_class = "border-red", "metric-change-down"
+        else:
+            border_class, color_class = "border-gray", "metric-change-hold"
             
-            # 3. Analisa Berita (Sekarang narik otomatis dari RSS Yahoo Finance)
-            news_sentiment = get_news_sentiment()
+        html = f"""
+        <div class="metric-container {border_class}">
+            <div class="metric-title">{item.get('Pair', 'UNKNOWN')}</div>
+            <div class="metric-value-row">
+                <div class="metric-price">{item.get('Harga Realtime', '0.00')}</div>
+                <div class="{color_class}">{sinyal}</div>
+            </div>
+        </div>
+        """
+        cols[i].markdown(html, unsafe_allow_html=True)
+    st.write("") 
+
+def render_left_panel(machine_status, market_data):
+    # Logika Status
+    dot_class = "status-dot-active" if machine_status == "ACTIVE" else "status-dot-error"
+    status_color = "#00C853" if machine_status == "ACTIVE" else "#D50000"
+    
+    st.markdown(f"""
+    <div class="panel-card">
+        <div class="panel-header">💾 STATUS MESIN</div>
+        <div><span class="status-dot {dot_class}"></span><span class="status-text" style="color:{status_color};">{machine_status}</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Panel Rekomendasi (Risk Mitigation)
+    st.markdown('<div class="panel-card"><div class="panel-header">🎯 REKOMENDASI ENTRY (SMC)</div>', unsafe_allow_html=True)
+    for item in market_data:
+        pair = item.get("Pair", "")
+        potensi = item.get("Potensi", "RENDAH ⚪")
+        
+        # Pewarnaan teks potensi
+        val_color = "#00C853" if "TINGGI" in potensi else "#FFAB00" if "MENENGAH" in potensi else "#8a8a8a"
+        st.markdown(f'<div class="list-row"><span class="list-label">{pair}</span><span class="list-val" style="color:{val_color};">{potensi}</span></div>', unsafe_allow_html=True)
+        
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_right_panel():
+    st.markdown('<div class="panel-card"><div class="panel-header">📰 KATALIS SENTIMEN MARKET</div>', unsafe_allow_html=True)
+    news_data = get_live_news()
+    
+    if not news_data:
+        st.markdown("<div class='status-sub'>Sedang menarik data berita RSS...</div>", unsafe_allow_html=True)
+    else:
+        for n in news_data:
+            st.markdown(f"<a href='{n['link']}' target='_blank' style='color: #64b5f6; font-size: 15px; font-weight: 600; text-decoration: none;'>{n['title']}</a>", unsafe_allow_html=True)
+            # Tanggal terbit sekarang ditampilkan rapi di sini
+            st.markdown(f"<div style='color: #8a8a8a; font-size: 11px; margin-top: 2px; margin-bottom: 6px;'>🕒 {n['time']} | 📡 {n['source']}</div>", unsafe_allow_html=True)
+            st.markdown("<hr style='border-color: #2b2b2b; margin: 12px 0;'>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# 5. MAIN LOOP
+# ==========================================
+def main():
+    load_custom_css()
+    main_placeholder = st.empty()
+    
+    while True:
+        market_data = []
+        machine_status = "OFFLINE"
+        
+        if os.path.exists("status_market.json"):
+            try:
+                with open("status_market.json", "r") as f:
+                    market_data = json.load(f)
+                machine_status = "ACTIVE"
+            except:
+                pass
+                
+        if not market_data:
+            market_data = [{"Pair": "MENUNGGU DATA", "Harga Realtime": "0.00", "Sinyal": "Standby", "Potensi": "..."}]
+
+        with main_placeholder.container():
+            render_header()
+            render_top_metrics(market_data)
             
-            # 4. Eksekusi
-            execute_trade(SYMBOL, tech_signal, atr_value, news_sentiment)
-            
-            # Jeda 1 Jam sesuai timeframe agar tidak spam request
-            time.sleep(3600)
-            
-    except KeyboardInterrupt:
-        print("\nBot dihentikan oleh user.")
-    except Exception as e:
-        print(f"\nTerjadi Error Sistem: {e}")
-    finally:
-        mt5.shutdown()
-        print("Koneksi MT5 diputus.")
+            col_left, col_right = st.columns([1, 2.5])
+            with col_left:
+                render_left_panel(machine_status, market_data)
+            with col_right:
+                render_right_panel()
+                
+        time_mod.sleep(2)
 
 if __name__ == "__main__":
-    run_bot()
+    main()

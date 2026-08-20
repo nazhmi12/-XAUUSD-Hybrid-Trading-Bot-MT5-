@@ -1,73 +1,25 @@
-import streamlit as st
-import json
+import sys
 import time as time_mod
-import os
-import feedparser
 from datetime import datetime
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from pathlib import Path
 
-# ==========================================
-# 1. INISIALISASI HALAMAN & NLP
-# ==========================================
+import streamlit as st
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR / "src"))
+
+from bot_mt5.config import get_settings
+from bot_mt5.news import get_live_news
+from bot_mt5.storage import read_market_status
+
 st.set_page_config(page_title="Live Auto-Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 
-@st.cache_resource
-def get_analyzer():
-    return SentimentIntensityAnalyzer()
-
-analyzer = get_analyzer()
-
-def analyze_news_impact(title):
-    title_lower = title.lower()
-    asset = "GLOBAL"
-    if any(w in title_lower for w in ["usd", "dollar", "fed", "powell", "rate", "inflation", "cpi"]): asset = "USD"
-    elif any(w in title_lower for w in ["eur", "euro", "ecb"]): asset = "EURUSD"
-    elif any(w in title_lower for w in ["gbp", "pound", "boe"]): asset = "GBPUSD"
-    elif any(w in title_lower for w in ["jpy", "yen", "boj"]): asset = "USDJPY"
-        
-    score = analyzer.polarity_scores(title)['compound']
-    if score >= 0.15: return asset, "NAIK", "buy", round(abs(score), 2)
-    elif score <= -0.15: return asset, "TURUN", "sell", round(abs(score), 2)
-    return asset, "NETRAL", "hold", round(abs(score), 2)
 
 @st.cache_data(ttl=20)
-def get_live_news():
-    rss_sources = {
-        "FOREX FACTORY": "https://www.forexfactory.com/news.xml",
-        "FXSTREET": "https://www.fxstreet.com/rss/news",
-        "FOREXLIVE": "https://www.forexlive.com/feed/news",
-        "YAHOO": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=DX-Y.NYB&region=US&lang=en-US"
-    }
-    
-    news_items = []
-    for source_name, url in rss_sources.items():
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
-                asset, impact_text, impact_type, conf = analyze_news_impact(entry.title)
-                
-                # Parsing Waktu Lebih Akurat (Mendapatkan Tanggal)
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    pub_time = time_mod.strftime("%d %b %Y - %H:%M WIB", entry.published_parsed)
-                else:
-                    pub_time = datetime.now().strftime("%d %b %Y - %H:%M WIB")
+def cached_live_news():
+    return get_live_news()
 
-                news_items.append({
-                    "title": entry.title,
-                    "time": pub_time,
-                    "source": source_name,
-                    "asset": asset,
-                    "impact": impact_text,
-                    "conf": conf,
-                    "link": entry.link
-                })
-        except:
-            continue
-    return news_items
 
-# ==========================================
-# 3. CSS INJECTION 
-# ==========================================
 def load_custom_css():
     st.markdown("""
         <style>
@@ -88,21 +40,13 @@ def load_custom_css():
         .status-dot-active { background-color: #00C853; }
         .status-dot-error { background-color: #D50000; }
         .status-text { color: #ffffff; font-size: 18px; font-weight: 700; margin-bottom: 5px; }
-        .status-sub { color: #8a8a8a; font-size: 12px; font-family: monospace; }
         .list-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #222; padding-bottom: 5px;}
         .list-label { color: #d1d1d1; font-size: 14px; }
         .list-val { color: #ffffff; font-size: 14px; font-weight: 600; }
-        .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-        .badge-sell { background-color: rgba(213, 0, 0, 0.15); color: #D50000; }
-        .badge-buy { background-color: rgba(0, 200, 83, 0.15); color: #00C853; }
-        .badge-hold { background-color: rgba(255, 171, 0, 0.15); color: #FFAB00; }
-        .badge-blue { background-color: rgba(41, 121, 255, 0.15); color: #2979ff; }
         </style>
     """, unsafe_allow_html=True)
 
-# ==========================================
-# 4. KOMPONEN UI DINAMIS
-# ==========================================
+
 def render_header():
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -112,100 +56,84 @@ def render_header():
         st.markdown(f"<div style='text-align: right; color: #8a8a8a; font-family: monospace; margin-top: 15px;'>{now_str}</div>", unsafe_allow_html=True)
     st.markdown("<hr style='margin-top: 10px; margin-bottom: 20px;'>", unsafe_allow_html=True)
 
+
 def render_top_metrics(market_data):
     cols = st.columns(len(market_data))
     for i, item in enumerate(market_data):
-        sinyal = item.get("Sinyal", "HOLD")
-        if "BUY" in sinyal:
+        signal = item.get("Sinyal", "HOLD")
+        if "BUY" in signal:
             border_class, color_class = "border-green", "metric-change-up"
-        elif "SELL" in sinyal:
+        elif "SELL" in signal:
             border_class, color_class = "border-red", "metric-change-down"
         else:
             border_class, color_class = "border-gray", "metric-change-hold"
-            
-        html = f"""
+
+        cols[i].markdown(f"""
         <div class="metric-container {border_class}">
             <div class="metric-title">{item.get('Pair', 'UNKNOWN')}</div>
             <div class="metric-value-row">
                 <div class="metric-price">{item.get('Harga Realtime', '0.00')}</div>
-                <div class="{color_class}">{sinyal}</div>
+                <div class="{color_class}">{signal}</div>
             </div>
         </div>
-        """
-        cols[i].markdown(html, unsafe_allow_html=True)
-    st.write("") 
+        """, unsafe_allow_html=True)
+    st.write("")
+
 
 def render_left_panel(machine_status, market_data):
-    # Logika Status
     dot_class = "status-dot-active" if machine_status == "ACTIVE" else "status-dot-error"
     status_color = "#00C853" if machine_status == "ACTIVE" else "#D50000"
-    
+
     st.markdown(f"""
     <div class="panel-card">
         <div class="panel-header">💾 STATUS MESIN</div>
         <div><span class="status-dot {dot_class}"></span><span class="status-text" style="color:{status_color};">{machine_status}</span></div>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Panel Rekomendasi (Risk Mitigation)
+
     st.markdown('<div class="panel-card"><div class="panel-header">🎯 REKOMENDASI ENTRY (SMC)</div>', unsafe_allow_html=True)
     for item in market_data:
-        pair = item.get("Pair", "")
-        potensi = item.get("Potensi", "RENDAH ⚪")
-        
-        # Pewarnaan teks potensi
-        val_color = "#00C853" if "TINGGI" in potensi else "#FFAB00" if "MENENGAH" in potensi else "#8a8a8a"
-        st.markdown(f'<div class="list-row"><span class="list-label">{pair}</span><span class="list-val" style="color:{val_color};">{potensi}</span></div>', unsafe_allow_html=True)
-        
+        potential = item.get("Potensi", "RENDAH ⚪")
+        val_color = "#00C853" if "TINGGI" in potential else "#FFAB00" if "MENENGAH" in potential else "#8a8a8a"
+        st.markdown(f'<div class="list-row"><span class="list-label">{item.get("Pair", "")}</span><span class="list-val" style="color:{val_color};">{potential}</span></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
 
 def render_right_panel():
     st.markdown('<div class="panel-card"><div class="panel-header">📰 KATALIS SENTIMEN MARKET</div>', unsafe_allow_html=True)
-    news_data = get_live_news()
-    
+    news_data = cached_live_news()
     if not news_data:
-        st.markdown("<div class='status-sub'>Sedang menarik data berita RSS...</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#8a8a8a;'>Sedang menarik data berita RSS...</div>", unsafe_allow_html=True)
     else:
         for n in news_data:
             st.markdown(f"<a href='{n['link']}' target='_blank' style='color: #64b5f6; font-size: 15px; font-weight: 600; text-decoration: none;'>{n['title']}</a>", unsafe_allow_html=True)
-            # Tanggal terbit sekarang ditampilkan rapi di sini
             st.markdown(f"<div style='color: #8a8a8a; font-size: 11px; margin-top: 2px; margin-bottom: 6px;'>🕒 {n['time']} | 📡 {n['source']}</div>", unsafe_allow_html=True)
             st.markdown("<hr style='border-color: #2b2b2b; margin: 12px 0;'>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ==========================================
-# 5. MAIN LOOP
-# ==========================================
+
 def main():
+    settings = get_settings()
     load_custom_css()
     main_placeholder = st.empty()
-    
+
     while True:
-        market_data = []
-        machine_status = "OFFLINE"
-        
-        if os.path.exists("status_market.json"):
-            try:
-                with open("status_market.json", "r") as f:
-                    market_data = json.load(f)
-                machine_status = "ACTIVE"
-            except:
-                pass
-                
+        market_data = read_market_status(settings.status_file)
+        machine_status = "ACTIVE" if market_data else "OFFLINE"
         if not market_data:
             market_data = [{"Pair": "MENUNGGU DATA", "Harga Realtime": "0.00", "Sinyal": "Standby", "Potensi": "..."}]
 
         with main_placeholder.container():
             render_header()
             render_top_metrics(market_data)
-            
             col_left, col_right = st.columns([1, 2.5])
             with col_left:
                 render_left_panel(machine_status, market_data)
             with col_right:
                 render_right_panel()
-                
+
         time_mod.sleep(2)
+
 
 if __name__ == "__main__":
     main()

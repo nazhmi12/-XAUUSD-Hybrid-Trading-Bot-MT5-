@@ -1,0 +1,8 @@
+MetaTrader5
+pandas
+ta
+requests
+feedparser
+vaderSentiment
+streamlit
+python-dotenv

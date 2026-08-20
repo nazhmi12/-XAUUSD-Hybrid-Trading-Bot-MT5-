@@ -1,72 +1,80 @@
-🤖 XAUUSD Hybrid Trading Bot (MT5)
+# MT5 SMC Auto-Trading Terminal
 
-An algorithmic trading bot built with Python for MetaTrader 5 (MT5). This bot is specifically designed for trading XAUUSD (Gold) by utilizing a Dual-Confirmation Strategy: combining Technical Analysis (TA) and Fundamental News Sentiment.
+Bot trading berbasis Python untuk MetaTrader 5 dengan dashboard Streamlit. Engine bot membaca data market MT5, menghitung sinyal SMC/ATR, menulis status ke JSON, lalu dashboard menampilkannya secara realtime.
 
-✨ Features
+> ⚠️ Educational only. Selalu test di akun demo. Default `ENABLE_AUTO_TRADE=false` agar aman.
 
-MetaTrader 5 Integration: Direct order execution and OHLCV data fetching using the official MetaTrader5 Python library.
+## Struktur Project
 
-Technical Analysis: Uses EMA (Exponential Moving Average) crossovers and RSI (Relative Strength Index) to identify trends and momentum.
+```text
+bot-mt5/
+├── apps/
+│   ├── run_bot.py          # entrypoint engine trading
+│   └── dashboard.py        # dashboard Streamlit
+├── src/bot_mt5/
+│   ├── config.py           # load konfigurasi dari .env
+│   ├── mt5_client.py       # koneksi MT5, PnL, order
+│   ├── strategy.py         # logic SMC + ATR
+│   ├── notifier.py         # Telegram notifier
+│   ├── news.py             # RSS news + sentiment
+│   └── storage.py          # baca/tulis status_market.json
+├── data/                   # generated runtime data
+├── docs/                   # dokumentasi tambahan
+├── tests/
+├── .env.example
+├── .gitignore
+├── requirements.txt
+└── tests/
+```
 
-Dynamic Risk Management (ATR): Stop Loss (SL) and Take Profit (TP) are calculated dynamically based on market volatility using the Average True Range (ATR) indicator.
+## Setup
 
-News Sentiment Analysis (NLP): Scrapes real-time financial news via Yahoo Finance RSS feeds and evaluates market sentiment (Bullish/Bearish) using VADER Sentiment Analysis.
+1. Install MetaTrader 5 x64 dan login ke broker/demo.
+2. Aktifkan `Tools -> Options -> Expert Advisors -> Allow algorithmic trading`.
+3. Install dependency:
 
-Dual-Confirmation Logic: Trades are only executed when Technical signals and News Sentiment align, minimizing false breakouts.
+```bash
+pip install -r requirements.txt
+```
 
-⚙️ Prerequisites
+4. Copy `.env.example` ke `.env`, lalu isi konfigurasi MT5:
 
-OS: Windows (The MetaTrader5 library only supports Windows).
+```bash
+cp .env.example .env
+```
 
-Python: Version 3.8 or higher.
+Di Windows PowerShell:
 
-MetaTrader 5: Installed and logged into a broker account (Demo recommended).
+```powershell
+Copy-Item .env.example .env
+```
 
-📦 Installation
+## Menjalankan
 
-Clone this repository:
+Terminal 1 - engine bot:
 
-git clone https://github.com/USERNAME/XAUUSD-Hybrid-Trading-Bot.git
-cd XAUUSD-Hybrid-Trading-Bot
+```bash
+PYTHONIOENCODING=utf-8 python apps/run_bot.py
+```
 
+Terminal 2 - dashboard:
 
-Install the required Python dependencies:
+```bash
+streamlit run apps/dashboard.py
+```
 
-pip install MetaTrader5 pandas ta vaderSentiment feedparser requests
+## Konfigurasi Penting
 
+Lihat `.env.example`.
 
-🚀 How to Use
+- `ENABLE_AUTO_TRADE=false`: dry-run, sinyal dihitung tapi order tidak dikirim.
+- `ENABLE_AUTO_TRADE=true`: order real dikirim ke MT5 jika sinyal valid.
+- `SYMBOLS`: sesuaikan suffix broker, misalnya `EURUSDm` atau `EURUSD`.
+- `DAILY_TARGET_PROFIT` dan `DAILY_MAX_LOSS`: kill switch harian.
 
-Open your MetaTrader 5 application.
+## Dokumentasi
 
-Go to Tools -> Options -> Expert Advisors and check the "Allow algorithmic trading" box.
-
-Open xauusd_bot.py in your code editor.
-
-Update the MT5 configuration section with your account details:
-
-MT5_LOGIN = 12345678            # Your MT5 Account ID
-MT5_PASSWORD = "YourPassword"   # Your MT5 Password
-MT5_SERVER = "Your-Broker-Server" # E.g., "Exness-MT5Trial6"
-
-
-Run the bot:
-
-python xauusd_bot.py
-
-
-🧠 Strategy Logic
-
-ENTRY BUY: EMA 9 crosses above EMA 21 + RSI < 40 + News Sentiment is BULLISH.
-
-ENTRY SELL: EMA 9 crosses below EMA 21 + RSI > 70 + News Sentiment is BEARISH.
-
-STOP LOSS: Entry Price ± (ATR * 1.5)
-
-TAKE PROFIT: Entry Price ± (ATR * 1.5 * 2.0) (1:2 Risk to Reward Ratio)
-
-⚠️ Disclaimer
-
-Educational Purposes Only. Trading in financial markets (Forex, Commodities, Crypto) involves a high degree of risk. The developer is not responsible for any financial losses incurred while using this software. Always test algorithms on a Demo Account before deploying real capital.
-
-Created by Mr N - 2026
+- `docs/setup.md`
+- `docs/configuration.md`
+- `docs/strategy.md`
+- `docs/troubleshooting.md`
